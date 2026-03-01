@@ -1,0 +1,67 @@
+name: Reddit Daily Aggregator
+
+on:
+  schedule:
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Fetch and Aggregate
+        run: |
+          mkdir -p data
+          SUBS=(
+            
+            Openclaw
+            LocalLLaMA
+            LLMDevs
+            ArtificialIntelligence
+            ChatGPT
+            AI_Agents
+            Automate
+            MarketingAutomation
+            GrowthHacking
+            Entrepreneur
+            SideProject
+          )
+
+          echo "[]" > data/all.json
+
+          for sub in "${SUBS[@]}"; do
+            curl -s -A "Mozilla/5.0" \
+              "https://www.reddit.com/r/$sub/top.json?t=day&limit=25" \
+              -o tmp.json
+
+            jq --arg sub "$sub" '
+              .data.children[]
+              | {
+                  subreddit: $sub,
+                  title: .data.title,
+                  score: .data.score,
+                  comments: .data.num_comments,
+                  url: ("https://reddit.com" + .data.permalink)
+                }
+            ' tmp.json > sub.json
+
+            jq -s '.[0] + .[1]' data/all.json sub.json > merged.json
+            mv merged.json data/all.json
+          done
+
+          jq '[.[] | select(.score > 20 and .comments > 5)]' data/all.json > data/final.json
+
+          rm -f tmp.json sub.json data/all.json
+
+      - name: Commit
+        run: |
+          git config user.name "reddit-bot"
+          git config user.email "bot@example.com"
+          git add data/final.json
+          git commit -m "daily reddit update" || echo "no changes"
+          git push

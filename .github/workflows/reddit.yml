@@ -12,14 +12,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install jq
-        run: sudo apt-get install -y jq
+        run: sudo apt-get update && sudo apt-get install -y jq
 
       - name: Fetch and Aggregate
         run: |
+          set -e
           mkdir -p data
+
           SUBS=(
-            
-            Openclaw
             LocalLLaMA
             LLMDevs
             ArtificialIntelligence
@@ -34,34 +34,66 @@ jobs:
 
           echo "[]" > data/all.json
 
-          for sub in "${SUBS[@]}"; do
-            curl -s -A "Mozilla/5.0" \
+          fetch_sub() {
+            local sub="$1"
+            echo "Fetching r/$sub"
+
+            # Try www first
+            if curl -L -sS --fail \
+              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+              -H "Accept: application/json" \
               "https://www.reddit.com/r/$sub/top.json?t=day&limit=25" \
-              -o tmp.json
+              -o tmp.json; then
+              return 0
+            fi
+
+            # Fallback: old.reddit
+            if curl -L -sS --fail \
+              -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" \
+              -H "Accept: application/json" \
+              "https://old.reddit.com/r/$sub/top.json?t=day&limit=25" \
+              -o tmp.json; then
+              return 0
+            fi
+
+            echo "Failed to fetch r/$sub"
+            return 1
+          }
+
+          for sub in "${SUBS[@]}"; do
+            if ! fetch_sub "$sub"; then
+              continue
+            fi
+
+            if [ ! -s tmp.json ]; then
+              echo "Empty response for r/$sub"
+              continue
+            fi
 
             jq --arg sub "$sub" '
-              .data.children[]
-              | {
-                  subreddit: $sub,
-                  title: .data.title,
-                  score: .data.score,
-                  comments: .data.num_comments,
-                  url: ("https://reddit.com" + .data.permalink)
-                }
-            ' tmp.json > sub.json
+              .data.children[]? |
+              {
+                subreddit: $sub,
+                title: (.data.title // ""),
+                score: (.data.score // 0),
+                comments: (.data.num_comments // 0),
+                url: ("https://reddit.com" + (.data.permalink // ""))
+              }
+            ' tmp.json > sub.json || { echo "jq parse failed for r/$sub"; continue; }
 
             jq -s '.[0] + .[1]' data/all.json sub.json > merged.json
             mv merged.json data/all.json
           done
 
-          jq '[.[] | select(.score > 20 and .comments > 5)]' data/all.json > data/final.json
+          # Filter low-signal posts and cap output size
+          jq '[.[] | select(.score >= 20 and .comments >= 5)] | .[:200]' data/all.json > data/final.json
 
           rm -f tmp.json sub.json data/all.json
 
       - name: Commit
         run: |
           git config user.name "reddit-bot"
-          git config user.email "bot@example.com"
+          git config user.email "reddit-bot@users.noreply.github.com"
           git add data/final.json
           git commit -m "daily reddit update" || echo "no changes"
           git push

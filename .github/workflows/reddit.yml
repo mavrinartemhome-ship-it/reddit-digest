@@ -24,7 +24,6 @@ jobs:
           mkdir -p data
 
           SUBS=(
-            Openclaw
             LocalLLaMA
             LLMDevs
             ArtificialIntelligence
@@ -38,16 +37,44 @@ jobs:
           )
 
           echo "[]" > data/all.json
+          echo "" > data/fetch_log.txt
+
+          fetch_url() {
+            local url="$1"
+            local out="$2"
+            local code
+            code=$(curl -L -sS \
+              -H "User-Agent: Mozilla/5.0 (GitHubActions; +https://github.com/)" \
+              -H "Accept: application/json" \
+              -o "$out" \
+              -w "%{http_code}" \
+              "$url" || echo "000")
+            echo "$code"
+          }
 
           for sub in "${SUBS[@]}"; do
-            echo "Fetching r/$sub"
+            echo "=== r/$sub ===" >> data/fetch_log.txt
 
-            curl -L -sS --fail \
-              -H "User-Agent: Mozilla/5.0" \
-              "https://www.reddit.com/r/$sub/top.json?t=day&limit=25" \
-              -o tmp.json || continue
+            code=$(fetch_url "https://www.reddit.com/r/$sub/top.json?t=day&limit=50" "tmp.json")
+            echo "www top: $code" >> data/fetch_log.txt
+
+            if [ "$code" != "200" ]; then
+              code=$(fetch_url "https://old.reddit.com/r/$sub/top.json?t=day&limit=50" "tmp.json")
+              echo "old top: $code" >> data/fetch_log.txt
+            fi
+
+            if [ "$code" != "200" ]; then
+              code=$(fetch_url "https://www.reddit.com/r/$sub/hot.json?limit=50" "tmp.json")
+              echo "www hot: $code" >> data/fetch_log.txt
+            fi
+
+            if [ "$code" != "200" ]; then
+              echo "SKIP r/$sub" >> data/fetch_log.txt
+              continue
+            fi
 
             if [ ! -s tmp.json ]; then
+              echo "EMPTY BODY r/$sub" >> data/fetch_log.txt
               continue
             fi
 
@@ -58,22 +85,41 @@ jobs:
                 title: (.data.title // ""),
                 score: (.data.score // 0),
                 comments: (.data.num_comments // 0),
+                created_utc: (.data.created_utc // 0),
                 url: ("https://reddit.com" + (.data.permalink // ""))
               }
-            ' tmp.json > sub.json || continue
+            ' tmp.json > sub.json || { echo "JQ FAIL r/$sub" >> data/fetch_log.txt; continue; }
 
             jq -s '.[0] + .[1]' data/all.json sub.json > merged.json
             mv merged.json data/all.json
           done
 
-          jq '[.[] | select(.score >= 20 and .comments >= 5)] | .[:200]' data/all.json > data/final.json
+          # Сохраняем сырой агрегат для дебага
+          mv data/all.json data/unfiltered.json
 
-          rm -f tmp.json sub.json data/all.json
+          # Если вообще ничего не собрали, падаем
+          count=$(jq 'length' data/unfiltered.json)
+          if [ "$count" -eq 0 ]; then
+            echo "No data collected. Check data/fetch_log.txt"
+            exit 1
+          fi
+
+          # Мягкий фильтр + сортировка
+          jq '
+            [ .[] 
+              | select(.title != "" and .url != "https://reddit.com")
+              | select(.score >= 5 or .comments >= 3)
+            ]
+            | sort_by(-.score, -.comments)
+            | .[:200]
+          ' data/unfiltered.json > data/final.json
+
+          rm -f tmp.json sub.json merged.json
 
       - name: Commit and Push
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add data/final.json
+          git add data/final.json data/unfiltered.json data/fetch_log.txt
           git commit -m "daily reddit update" || echo "No changes"
           git push
